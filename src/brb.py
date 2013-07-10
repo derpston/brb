@@ -59,14 +59,37 @@ class BRB:
     def _blockpath(self, blocknum):
         """Return the path to where a block with `blocknum` can be found."""
         return os.path.join(self._basedir, "0x%08x.block" % blocknum)
+
+    def _blocks(self):
+        """Returns a generator of tuples, [(blockid, first, last), ...]"""
+        for blocknum in xrange(self._blockcount):
+            try:
+                sequence = self._identify(blocknum)
+            except IOError, ex:
+                continue
+        
+            f = self._iter(blocknum, oneblock = True).next()
+            l = self._iter(blocknum, direction = -1, oneblock = True).next()
+
+            size = self._size(blocknum)
+
+            yield blocknum, size, f, l
+ 
+    def _size(self, blocknum):
+        return os.stat(self._blockpath(blocknum)).st_size
   
 class BRBReader(BRB):
+    def __init__(self, *args, **kwargs):
+        BRB.__init__(self, *args, **kwargs)
+
+        self._index()
+
     def __iter__(self):
         first, last = self._scanblocks()
         for (blocknum, start, timestamp, data) in self._iter(first['blocknum']):
             yield timestamp, data
 
-    def _iter(self, block, offset = 0, direction = 1):
+    def _iter(self, block, offset = None, direction = 1, oneblock = False):
         """A generator that yields the byte data for each record, oldest to newest."""
         blocknum = block
 
@@ -83,8 +106,8 @@ class BRBReader(BRB):
             if direction == 1:
                 offsets = self._getOffsets(mapped, struct.pack(">L", self._magicnumber_record), start = offset)
             else:
-                offsets = self._rGetOffsets(mapped, struct.pack(">L", self._magicnumber_record))
-                
+                offsets = self._rGetOffsets(mapped, struct.pack(">L", self._magicnumber_record), start = offset)
+            
             for (start, end) in offsets:
                 logging.debug("Found record: %s:%d-%d" % (blockpath, start, end))
                 timestamp = struct.unpack(">d", mapped[start:start + struct.calcsize(">d")])[0]
@@ -93,13 +116,49 @@ class BRBReader(BRB):
             del mapped
             fh.close()
 
+            if oneblock is True:
+                break
+
             # Advance to the next block, but stop when we wrap around to the starting block.
             blocknum = (blocknum + direction) % self._blockcount
-            print "block change, %d" % direction
             if blocknum == -1:
                 blocknum = self._blockcount
             if blocknum == block:
                 raise StopIteration
+
+    def readblock(self, block, timestamp_wanted):
+        closest_data = None
+        closest_timestamp = 0
+
+        # Find the closest offset to skip to.
+        closest_offset = 0
+        for ts, offset in self._indexes[block]:
+            if ts < timestamp_wanted:
+                closest_offset = offset
+
+            if ts > timestamp_wanted:
+                break
+        
+        for (blocknum, start, timestamp, data) in self._iter(block, closest_offset):
+            if timestamp < timestamp_wanted and timestamp > closest_timestamp:
+                closest_data = data
+                closest_timestamp = timestamp
+            else:
+                break
+     
+        return closest_timestamp, closest_data
+
+    def _index(self):
+        self._indexes = {}
+
+        for blocknum in xrange(self._blockcount):
+            size = self._size(blocknum)
+            blockindex = []
+            for offset in xrange(20, size, (size - 20) / 100):
+                (_, start, timestamp, data) = self._iter(blocknum, offset, direction = -1, oneblock = True).next()
+                blockindex.append((timestamp, start))
+
+            self._indexes[blocknum] = blockindex
 
     def read(self, timestamp_wanted):
         first, last = self._scanblocks()
@@ -186,8 +245,13 @@ class BRBReader(BRB):
 
         return last
 
-    def _getOffsets(self, mapped, magicbytes, start = 0):
+    def _getOffsets(self, mapped, magicbytes, start = None):
         """A generator that yields pairs of byte offsets in `mapped` corresponding to the first and last bytes between appearances of `magicbytes`. For example, 'xABCxDEF' would produce [(1, 4), (5, 8)]"""
+        if start is None:
+            start = 0
+        else:
+            start -= len(magicbytes)
+
         start = mapped.find(magicbytes, start)
         while True:
             end = mapped.find(magicbytes, start + len(magicbytes))
@@ -198,9 +262,13 @@ class BRBReader(BRB):
             yield (start + len(magicbytes), end)
             start = end
 
-    def _rGetOffsets(self, mapped, magicbytes):
+    def _rGetOffsets(self, mapped, magicbytes, start = None):
         """Like _getOffsets, except backwards."""
-        end = mapped.size()
+        if start is None:
+            end = mapped.size()
+        else:
+            end = start
+
         while True:
             start = mapped.rfind(magicbytes, 0, end)
             if start == -1:
