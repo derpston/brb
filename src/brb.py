@@ -126,26 +126,37 @@ class BRBReader(BRB):
             if blocknum == block:
                 raise StopIteration
 
-    def readblock(self, block, timestamp_wanted):
+    def readblock(self, block, timestamp_wanted, direction = 1):
         closest_data = None
         closest_timestamp = 0
 
         # Find the closest offset to skip to.
         closest_offset = 0
         for ts, offset in self._indexes[block]:
-            if ts < timestamp_wanted:
+            if ts <= timestamp_wanted:
                 closest_offset = offset
 
             if ts > timestamp_wanted:
                 break
         
-        for (blocknum, start, timestamp, data) in self._iter(block, closest_offset):
-            if timestamp < timestamp_wanted and timestamp > closest_timestamp:
-                closest_data = data
-                closest_timestamp = timestamp
-            else:
-                break
-     
+        for (blocknum, start, timestamp, data) in self._iter(block, closest_offset, direction = direction):
+            if direction == 0:
+                if timestamp <= timestamp_wanted and timestamp >= closest_timestamp:
+                    closest_data = data
+                    closest_timestamp = timestamp
+                else:
+                    break
+            elif direction > 0:
+                if timestamp > timestamp_wanted:
+                    closest_data = data
+                    closest_timestamp = timestamp
+                    break
+            elif direction < 0:
+                if timestamp < timestamp_wanted:
+                    closest_data = data
+                    closest_timestamp = timestamp
+                    break
+
         return closest_timestamp, closest_data
 
     def _index(self):
@@ -273,6 +284,7 @@ class BRBReader(BRB):
             start = mapped.rfind(magicbytes, 0, end)
             if start == -1:
                 raise StopIteration
+
             yield start + len(magicbytes), end
             end = start
 
